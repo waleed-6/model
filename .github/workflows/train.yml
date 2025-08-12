@@ -1,0 +1,85 @@
+name: Train-MLAgents-CPU
+
+on:
+  workflow_dispatch:
+    inputs:
+      gdrive_file_id:
+        description: "Google Drive file id of your Linux build ZIP"
+        default: "1wOrwyYQHbaiK_XFouEutm0t88RrlRQ5-"
+        required: true
+      yaml_path:
+        description: "Training YAML path in repo"
+        default: "interceptor_pro.yaml"
+        required: true
+      run_id:
+        description: "Run ID label"
+        default: "drone_run_001"
+        required: true
+      time_scale:
+        description: "Unity time scale (higher = faster)"
+        default: "20"
+        required: true
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # 6h per job (GitHub hosted)
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Ensure YAML exists
+        run: |
+          if [ ! -f "${{ github.event.inputs.yaml_path }}" ]; then
+            echo "YAML not found at '${{ github.event.inputs.yaml_path }}' — commit it to the repo root or update the input."
+            exit 1
+          fi
+
+      - name: Set up Python 3.10.8 (matches mlagents 0.30.0)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10.8"
+
+      - name: Install trainer + gdown
+        run: |
+          python -m pip install -U pip
+          pip install "mlagents==0.30.0" "tensorboard==2.14.0" gdown
+
+      - name: Download Linux headless build from Google Drive
+        run: |
+          mkdir -p env_zip
+          gdown --id "${{ github.event.inputs.gdrive_file_id }}" -O env_zip/build.zip
+
+      - name: Unzip and make executable
+        run: |
+          mkdir -p env
+          unzip -q env_zip/build.zip -d ./env
+          chmod +x $(find ./env -name "*.x86_64" || true)
+          echo "Found executables:"
+          find ./env -name "*.x86_64" -print || true
+
+      - name: Locate executable
+        id: findexe
+        run: |
+          EXE=$(find ./env -name "*.x86_64" | head -n1)
+          if [ -z "$EXE" ]; then
+            echo "No .x86_64 executable found under ./env"
+            exit 1
+          fi
+          echo "exe_path=$EXE" >> $GITHUB_OUTPUT
+          echo "Using $EXE"
+
+      - name: Train (CPU)
+        env:
+          ENV_PATH: ${{ steps.findexe.outputs.exe_path }}
+        run: |
+          mlagents-learn "${{ github.event.inputs.yaml_path }}" \
+            --env="${ENV_PATH}" \
+            --run-id="${{ github.event.inputs.run_id }}" \
+            --no-graphics --time-scale="${{ github.event.inputs.time_scale }}"
+
+      - name: Upload training results
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ github.event.inputs.run_id }}
+          path: results
