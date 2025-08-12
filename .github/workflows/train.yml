@@ -4,21 +4,25 @@ on:
   workflow_dispatch:
     inputs:
       gdrive_file_id:
-        description: "Google Drive file id لملف ZIP الخاص ببناء Linux"
+        description: "Google Drive file ID for Linux build ZIP"
         required: true
         default: "1wOrwyYQHbaiK_XFouEutm0t88RrlRQ5-"
       yaml_path:
-        description: "مسار YAML (اختياري). اتركه فاضي لاكتشاف تلقائي"
+        description: "Path to YAML config (optional - leave empty for auto-detection)"
         required: false
         default: ""
       run_id:
-        description: "وسم تشغيل التدريب"
+        description: "Training run identifier"
         required: true
         default: "drone_run_001"
       time_scale:
-        description: "Unity time scale (كلما زاد أسرع)"
+        description: "Unity time scale (higher = faster training)"
         required: true
         default: "20"
+      max_steps:
+        description: "Maximum training steps"
+        required: false
+        default: "500000"
 
 jobs:
   train:
@@ -26,146 +30,368 @@ jobs:
     timeout-minutes: 360
 
     env:
-      # احتياط ضد مشاكل البروتوبف
+      # Fix protobuf issues
       PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
+      # Prevent Unity from hanging
+      DISPLAY: ":99"
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Show repo contents (debug)
+      - name: Setup virtual display (for Unity headless)
         run: |
-          echo "PWD: $(pwd)"
-          echo "Branch: ${{ github.ref }}"
-          ls -la
-          echo "Search for interceptor yaml candidates:"
-          find . -maxdepth 5 -iname "interceptor*.yml*" -print || true
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
 
-      - name: Resolve YAML path
-        id: resolveyaml
+      - name: Debug repository contents
         run: |
-          INP="${{ github.event.inputs.yaml_path }}"
-          if [ -n "$INP" ] && [ -f "$INP" ]; then
-            echo "yaml_path=$INP" >> $GITHUB_OUTPUT
-            echo "Using provided YAML: $INP"
+          echo "Current working directory: $(pwd)"
+          echo "Git branch: ${{ github.ref }}"
+          echo "Repository structure:"
+          find . -maxdepth 3 -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.json" \) -print
+          echo "Looking for interceptor configs:"
+          find . -maxdepth 5 -iname "*interceptor*" -type f -print || echo "No interceptor files found"
+
+      - name: Set up Python 3.9 (better ML-Agents compatibility)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install ML-Agents and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install specific versions for compatibility
+          pip install torch==1.13.1 torchvision==0.14.1 --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install "protobuf==3.20.3"
+          pip install "mlagents==0.30.0"
+          pip install "tensorboard==2.11.2"
+          pip install gdown requests
+          # Verify installation
+          python -c "import mlagents; print(f'ML-Agents version: {mlagents.__version__}')"
+          mlagents-learn --help > /dev/null && echo "mlagents-learn command available"
+
+      - name: Resolve training configuration
+        id: resolve_config
+        run: |
+          USER_YAML="${{ github.event.inputs.yaml_path }}"
+          
+          # Check if user provided a valid YAML path
+          if [[ -n "$USER_YAML" && -f "$USER_YAML" ]]; then
+            echo "yaml_path=$USER_YAML" >> $GITHUB_OUTPUT
+            echo "Using user-specified YAML: $USER_YAML"
             exit 0
           fi
-
-          for p in \
-            interceptor_pro.yaml \
-            interceptor_pro.yml \
-            config/interceptor_pro.yaml \
-            config/interceptor_pro.yml \
-            Assets/config/interceptor_pro.yaml \
-            Assets/config/interceptor_pro.yml
-          do
-            if [ -f "$p" ]; then
-              echo "yaml_path=$p" >> $GITHUB_OUTPUT
-              echo "Auto-detected YAML at $p"
+          
+          # Search for configuration files in common locations
+          SEARCH_PATHS=(
+            "interceptor_pro.yaml"
+            "interceptor_pro.yml"
+            "config/interceptor_pro.yaml" 
+            "config/interceptor_pro.yml"
+            "Assets/config/interceptor_pro.yaml"
+            "Assets/config/interceptor_pro.yml"
+            "Assets/ML-Agents/interceptor_pro.yaml"
+            "Assets/ML-Agents/interceptor_pro.yml"
+          )
+          
+          for path in "${SEARCH_PATHS[@]}"; do
+            if [[ -f "$path" ]]; then
+              echo "yaml_path=$path" >> $GITHUB_OUTPUT
+              echo "Auto-detected training config: $path"
               exit 0
             fi
           done
-
-          CAND=$(find . -maxdepth 5 -iname "interceptor*.yml*" | head -n1)
-          if [ -n "$CAND" ] && [ -f "$CAND" ]; then
-            echo "yaml_path=$CAND" >> $GITHUB_OUTPUT
-            echo "Found YAML at $CAND"
+          
+          # Try to find any interceptor config file
+          FOUND_CONFIG=$(find . -maxdepth 5 -iname "*interceptor*.yml*" -type f | head -n1)
+          if [[ -n "$FOUND_CONFIG" ]]; then
+            echo "yaml_path=$FOUND_CONFIG" >> $GITHUB_OUTPUT
+            echo "Found config file: $FOUND_CONFIG"
             exit 0
           fi
-
+          
+          # No config found - will create a basic one or run probe only
           echo "yaml_path=" >> $GITHUB_OUTPUT
-          echo "No YAML found (this is OK for probe step)."
+          echo "No training configuration found - will run environment probe only"
 
-      - name: Set up Python 3.10.8 (compatible with mlagents 0.30.0)
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10.8"
-
-      - name: Install trainer + tools (pin protobuf)
+      - name: Download Unity build from Google Drive
         run: |
-          python -m pip install -U pip
-          pip install "protobuf==3.20.3"
-          pip install "mlagents==0.30.0" "mlagents_envs==0.30.0"
-          pip install "tensorboard==2.14.0" gdown
-
-      - name: Download Linux build from Google Drive
-        run: |
-          mkdir -p env_zip
-          gdown --id "${{ github.event.inputs.gdrive_file_id }}" -O env_zip/build.zip
-          ls -lh env_zip
-
-      - name: Unzip build and make executable (robust)
-        id: unzipbuild
-        run: |
-          mkdir -p env
-          unzip -q env_zip/build.zip -d ./env || { echo "Unzip failed"; exit 1; }
-
-          echo "Top-level after unzip:"
-          find ./env -maxdepth 2 -print
-
-          # أمسك أول ملف تنفيذي لينُكس .x86_64 وتجاهل __MACOSX
-          EXE=$(find ./env -type f -iname "*.x86_64" ! -path "*/__MACOSX/*" | head -n1)
-
-          if [ -z "$EXE" ]; then
-            echo "No .x86_64 executable found. Full tree for debug:"
-            find ./env -maxdepth 5 -print
+          echo "Downloading build from Google Drive..."
+          mkdir -p env_download
+          cd env_download
+          
+          # Download with retry logic
+          for i in {1..3}; do
+            if gdown --id "${{ github.event.inputs.gdrive_file_id }}" -O build.zip; then
+              echo "Download successful on attempt $i"
+              break
+            else
+              echo "Download attempt $i failed, retrying..."
+              sleep 5
+            fi
+          done
+          
+          # Verify download
+          if [[ ! -f "build.zip" ]]; then
+            echo "Failed to download build.zip after 3 attempts"
+            exit 1
+          fi
+          
+          echo "Downloaded file info:"
+          ls -lh build.zip
+          
+          # Check if it's a valid zip file
+          if ! unzip -t build.zip > /dev/null 2>&1; then
+            echo "Downloaded file is not a valid ZIP archive"
+            file build.zip
             exit 1
           fi
 
-          chmod +x "$EXE"
-          echo "exe_path=$EXE" >> $GITHUB_OUTPUT
-          echo "Using executable: $EXE"
-
-      - name: Probe behaviors (list behavior names/specs)
-        id: probe
-        env:
-          ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
+      - name: Extract and prepare Unity executable
+        id: prepare_build
         run: |
-          python - << 'PY'
-import os, sys, json, time
+          echo "Extracting Unity build..."
+          mkdir -p unity_env
+          cd unity_env
+          
+          # Extract build
+          unzip -q ../env_download/build.zip
+          
+          echo "Contents after extraction:"
+          find . -maxdepth 3 -type f -print
+          
+          # Find the executable (ignore macOS metadata)
+          EXECUTABLE=$(find . -type f -name "*.x86_64" ! -path "*/__MACOSX/*" ! -path "*/._*" | head -n1)
+          
+          if [[ -z "$EXECUTABLE" ]]; then
+            echo "Error: No Linux executable (.x86_64) found in the build"
+            echo "Available files:"
+            find . -type f -print
+            exit 1
+          fi
+          
+          # Make executable and get absolute path
+          chmod +x "$EXECUTABLE"
+          ABS_PATH=$(realpath "$EXECUTABLE")
+          echo "exe_path=$ABS_PATH" >> $GITHUB_OUTPUT
+          echo "Unity executable prepared: $ABS_PATH"
+          
+          # Verify executable
+          if [[ ! -x "$ABS_PATH" ]]; then
+            echo "Error: Executable is not properly set up"
+            exit 1
+          fi
+
+      - name: Probe Unity environment
+        id: probe_env
+        env:
+          UNITY_ENV: ${{ steps.prepare_build.outputs.exe_path }}
+        run: |
+          echo "Probing Unity environment: $UNITY_ENV"
+          
+          # Create probe script
+          cat > probe_env.py << 'EOF'
+import os
+import sys
+import json
 from mlagents_envs.environment import UnityEnvironment
-from mlagents_envs.base_env import BehaviorName
+from mlagents_envs.exception import UnityTimeoutException, UnityWorkerInUseException
 
-env_path = os.environ.get("ENV_PATH")
-print(f"[Probe] Launching env: {env_path}")
-env = UnityEnvironment(file_name=env_path, no_graphics=True, timeout_wait=180)
-env.reset()
-behaviors = list(env.behavior_specs.keys())
-print("[Probe] Found behaviors:", behaviors)
-for b in behaviors:
-    spec = env.behavior_specs[b]
-    print(f"[Probe] {b}: obs_shapes={[o.shape for o in spec.observation_specs]}, "
-          f"action_type={'continuous' if spec.action_spec.is_continuous() else 'discrete'}, "
-          f"action_sizes={spec.action_spec.discrete_branch_sizes if spec.action_spec.is_discrete() else spec.action_spec.continuous_size}")
-env.close()
-# احفظ الأسماء في ملف لوغ واضح
-with open("behavior_names.txt","w") as f:
-    for b in behaviors:
-        f.write(f"{b}\n")
-PY
+def probe_environment():
+    env_path = os.environ.get("UNITY_ENV")
+    if not env_path:
+        print("Error: UNITY_ENV not set")
+        return False
+        
+    print(f"Probing Unity environment: {env_path}")
+    
+    try:
+        # Initialize environment with timeout
+        env = UnityEnvironment(
+            file_name=env_path,
+            no_graphics=True,
+            timeout_wait=300,
+            seed=42
+        )
+        
+        # Reset environment to get behavior specs
+        env.reset()
+        
+        # Get behavior information
+        behavior_names = list(env.behavior_specs.keys())
+        print(f"Found {len(behavior_names)} behavior(s): {behavior_names}")
+        
+        behavior_info = {}
+        for name in behavior_names:
+            spec = env.behavior_specs[name]
+            
+            # Get observation info
+            obs_shapes = [obs_spec.shape for obs_spec in spec.observation_specs]
+            
+            # Get action info
+            if spec.action_spec.is_continuous():
+                action_info = {
+                    "type": "continuous", 
+                    "size": spec.action_spec.continuous_size
+                }
+            else:
+                action_info = {
+                    "type": "discrete",
+                    "branches": spec.action_spec.discrete_branch_sizes
+                }
+            
+            behavior_info[name] = {
+                "observations": obs_shapes,
+                "actions": action_info
+            }
+            
+            print(f"Behavior '{name}':")
+            print(f"  Observations: {obs_shapes}")
+            print(f"  Actions: {action_info}")
+        
+        # Save behavior info
+        with open("behavior_specs.json", "w") as f:
+            json.dump(behavior_info, f, indent=2)
+            
+        with open("behavior_names.txt", "w") as f:
+            for name in behavior_names:
+                f.write(f"{name}\n")
+        
+        env.close()
+        print("Environment probe completed successfully")
+        return True
+        
+    except (UnityTimeoutException, UnityWorkerInUseException) as e:
+        print(f"Unity environment error: {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error during probe: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
-      - name: Upload probe results (behavior names)
+if __name__ == "__main__":
+    success = probe_environment()
+    sys.exit(0 if success else 1)
+EOF
+          
+          # Run probe
+          python probe_env.py
+          
+          # Display results
+          if [[ -f "behavior_specs.json" ]]; then
+            echo "Behavior specifications:"
+            cat behavior_specs.json
+          fi
+
+      - name: Create default training config
+        if: ${{ steps.resolve_config.outputs.yaml_path == '' }}
+        run: |
+          echo "No training config found, creating default configuration..."
+          
+          # Read first behavior name
+          if [[ -f "behavior_names.txt" ]]; then
+            BEHAVIOR_NAME=$(head -n1 behavior_names.txt | tr -d '\n\r')
+          else
+            BEHAVIOR_NAME="DroneAgent"
+          fi
+          
+          cat > default_config.yaml << EOF
+behaviors:
+  $BEHAVIOR_NAME:
+    trainer_type: ppo
+    hyperparameters:
+      batch_size: 1024
+      buffer_size: 10240
+      learning_rate: 3.0e-4
+      beta: 5.0e-4
+      epsilon: 0.2
+      lambd: 0.99
+      num_epoch: 3
+      learning_rate_schedule: linear
+    network_settings:
+      normalize: false
+      hidden_units: 128
+      num_layers: 2
+    reward_signals:
+      extrinsic:
+        gamma: 0.99
+        strength: 1.0
+    max_steps: ${{ github.event.inputs.max_steps }}
+    time_horizon: 64
+    summary_freq: 10000
+    threaded: true
+    self_play:
+      save_steps: 50000
+      team_change: 100000
+      swap_steps: 10000
+      play_against_latest_model_ratio: 0.5
+      window: 10
+EOF
+          
+          echo "yaml_path=default_config.yaml" >> $GITHUB_OUTPUT
+          echo "Created default training configuration for behavior: $BEHAVIOR_NAME"
+
+      - name: Upload environment probe results
         uses: actions/upload-artifact@v4
         with:
-          name: probe-behaviors-${{ github.event.inputs.run_id }}
-          path: behavior_names.txt
+          name: environment-probe-${{ github.event.inputs.run_id }}
+          path: |
+            behavior_names.txt
+            behavior_specs.json
 
-      - name: Train (CPU) — only if YAML exists
-        if: ${{ steps.resolveyaml.outputs.yaml_path != '' }}
+      - name: Start ML-Agents training
+        if: ${{ steps.resolve_config.outputs.yaml_path != '' || steps.resolve_config.outputs.yaml_path == 'default_config.yaml' }}
         env:
-          ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
+          UNITY_ENV: ${{ steps.prepare_build.outputs.exe_path }}
         run: |
-          echo "YAML path resolved to: ${{ steps.resolveyaml.outputs.yaml_path }}"
-          echo "ENV executable: ${ENV_PATH}"
-          mlagents-learn "${{ steps.resolveyaml.outputs.yaml_path }}" \
-            --env="${ENV_PATH}" \
+          CONFIG_FILE="${{ steps.resolve_config.outputs.yaml_path }}"
+          if [[ -z "$CONFIG_FILE" ]]; then
+            CONFIG_FILE="default_config.yaml"
+          fi
+          
+          echo "Starting training with configuration: $CONFIG_FILE"
+          echo "Unity environment: $UNITY_ENV"
+          echo "Run ID: ${{ github.event.inputs.run_id }}"
+          echo "Time scale: ${{ github.event.inputs.time_scale }}"
+          
+          # Verify config file exists
+          if [[ ! -f "$CONFIG_FILE" ]]; then
+            echo "Error: Training configuration file '$CONFIG_FILE' not found"
+            exit 1
+          fi
+          
+          echo "Training configuration:"
+          cat "$CONFIG_FILE"
+          
+          # Start training with proper error handling
+          mlagents-learn "$CONFIG_FILE" \
+            --env="$UNITY_ENV" \
             --run-id="${{ github.event.inputs.run_id }}" \
             --no-graphics \
-            --time-scale="${{ github.event.inputs.time_scale }}"
+            --time-scale="${{ github.event.inputs.time_scale }}" \
+            --width=84 \
+            --height=84 \
+            --quality-level=0 \
+            || {
+              echo "Training failed. Checking for common issues..."
+              # Check if results directory was created
+              if [[ -d "results" ]]; then
+                echo "Results directory exists, training may have started:"
+                find results -type f -name "*.txt" -o -name "*.log" | xargs cat
+              fi
+              exit 1
+            }
 
-      - name: Upload training results
-        if: ${{ steps.resolveyaml.outputs.yaml_path != '' }}
+      - name: Upload training results and logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ github.event.inputs.run_id }}
-          path: results
+          name: training-results-${{ github.event.inputs.run_id }}
+          path: |
+            results/
+            *.yaml
+            *.log
+            config/
