@@ -119,37 +119,37 @@ jobs:
 
       - name: Create probe script (debug behaviors)
         run: |
-          cat > probe.py << 'EOF'
-import os
-import sys
-from mlagents_envs.environment import UnityEnvironment
+          cat > probe.py << 'PROBE_SCRIPT'
+          import os
+          import sys
+          from mlagents_envs.environment import UnityEnvironment
 
-env_path = os.environ.get("ENV_PATH")
-print(f"[Probe] Testing environment: {env_path}")
+          env_path = os.environ.get("ENV_PATH")
+          print(f"[Probe] Testing environment: {env_path}")
 
-try:
-    env = UnityEnvironment(file_name=env_path, no_graphics=True, timeout_wait=180)
-    env.reset()
-    names = list(env.behavior_specs.keys())
-    print(f"[Probe] Found behaviors: {names}")
-    
-    for name in names:
-        spec = env.behavior_specs[name]
-        if spec.action_spec.is_discrete():
-            action_info = f"discrete branches: {spec.action_spec.discrete_branch_sizes}"
-        else:
-            action_info = f"continuous size: {spec.action_spec.continuous_size}"
-        
-        obs_shapes = [obs.shape for obs in spec.observation_specs]
-        print(f"[Probe] {name}: observations={obs_shapes}, {action_info}")
-    
-    env.close()
-    print("[Probe] Environment test successful!")
-    
-except Exception as e:
-    print(f"[Probe] Error testing environment: {e}")
-    sys.exit(1)
-EOF
+          try:
+              env = UnityEnvironment(file_name=env_path, no_graphics=True, timeout_wait=180)
+              env.reset()
+              names = list(env.behavior_specs.keys())
+              print(f"[Probe] Found behaviors: {names}")
+              
+              for name in names:
+                  spec = env.behavior_specs[name]
+                  if spec.action_spec.is_discrete():
+                      action_info = f"discrete branches: {spec.action_spec.discrete_branch_sizes}"
+                  else:
+                      action_info = f"continuous size: {spec.action_spec.continuous_size}"
+                  
+                  obs_shapes = [obs.shape for obs in spec.observation_specs]
+                  print(f"[Probe] {name}: observations={obs_shapes}, {action_info}")
+              
+              env.close()
+              print("[Probe] Environment test successful!")
+              
+          except Exception as e:
+              print(f"[Probe] Error testing environment: {e}")
+              sys.exit(1)
+          PROBE_SCRIPT
 
       - name: Test environment (probe behaviors)
         env:
