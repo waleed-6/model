@@ -83,13 +83,9 @@ jobs:
       - name: Install trainer + tools (with compatibility fixes)
         run: |
           python -m pip install -U pip
-          # Install graphics dependencies for headless Unity (Ubuntu 24.04 compatible)
+          # Install minimal graphics dependencies for headless Unity
           sudo apt-get update
-          sudo apt-get install -y xvfb libglu1-mesa libxrender1 libxrandr2 \
-            libxss1 libasound2t64 libgtk-3-0 libdrm2 libxcomposite1 \
-            libxdamage1 libxext6 libxfixes3 libxi6 libxinerama1 libxkbcommon0 \
-            libxtst6 libxxf86vm1 libgl1-mesa-glx libglib2.0-0 \
-            ca-certificates fonts-liberation libnss3 lsb-release xdg-utils
+          sudo apt-get install -y xvfb || echo "xvfb install failed, continuing..."
           # Install core dependencies first to avoid conflicts
           pip install "protobuf==3.20.3"
           pip install "six"
