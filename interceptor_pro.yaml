@@ -1,155 +1,74 @@
-name: train-mlagents
+# ML-Agents Training Configuration for Interceptor Drone
+# This file should replace your current interceptor_pro.yaml
 
-on:
-  workflow_dispatch:
-    inputs:
-      gdrive_file_id:
-        description: "Google Drive file id for Linux ZIP"
-        required: true
-      yaml_path:
-        description: "Path to YAML in repo (optional)"
-        required: false
-        default: ""
-      run_id:
-        description: "Run id"
-        required: true
-        default: "run_001"
-      time_scale:
-        description: "Unity time scale"
-        required: true
-        default: "20"
+behaviors:
+  InterceptorBrain:  # This should match your behavior name from Unity
+    trainer_type: ppo
+    
+    hyperparameters:
+      batch_size: 1024
+      buffer_size: 10240
+      learning_rate: 3.0e-4
+      beta: 5.0e-3
+      epsilon: 0.2
+      lambd: 0.95
+      num_epoch: 3
+      learning_rate_schedule: linear
+      
+    network_settings:
+      normalize: false
+      hidden_units: 128
+      num_layers: 2
+      vis_encode_type: simple
+      
+    reward_signals:
+      extrinsic:
+        gamma: 0.99
+        strength: 1.0
+        
+    behavioral_cloning:
+      demo_path: null
+      strength: 0.5
+      steps: 0
+      
+    keep_checkpoints: 5
+    max_steps: 500000
+    time_horizon: 64
+    summary_freq: 10000
+    
+    # Self-play settings (if applicable for drone vs drone scenarios)
+    # self_play:
+    #   save_steps: 50000
+    #   team_change: 100000
+    #   swap_steps: 10000
+    #   play_against_latest_model_ratio: 0.5
+    #   window: 10
 
-jobs:
-  train:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    env:
-      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: List repo
-        run: |
-          pwd
-          ls -la
-          find . -maxdepth 3 \( -iname "*.yml" -o -iname "*.yaml" \) -print
-
-      - name: Resolve YAML path
-        id: resolveyaml
-        shell: bash
-        run: |
-          INP="${{ github.event.inputs.yaml_path }}"
-          if [ -n "$INP" ] && [ -f "$INP" ]; then
-            echo "yaml_path=$INP" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          for p in interceptor_pro.yaml interceptor_pro.yml config/interceptor_pro.yaml config/interceptor_pro.yml Assets/config/interceptor_pro.yaml Assets/config/interceptor_pro.yml; do
-            if [ -f "$p" ]; then
-              echo "yaml_path=$p" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
-          CAND=$(find . -maxdepth 5 -type f -iname "interceptor*.yml*" | head -n1)
-          if [ -n "$CAND" ]; then
-            echo "yaml_path=$CAND" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "yaml_path=" >> "$GITHUB_OUTPUT"
-          echo "No YAML found"
-
-      - name: Set up Python 3.10.8
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10.8"
-
-      - name: Install Python deps
-        run: |
-          python -m pip install -U pip
-          pip install "protobuf==3.20.3"
-          pip install "mlagents==0.30.0" "mlagents_envs==0.30.0"
-          pip install tensorboard gdown
-
-      - name: Download Linux build from Google Drive
-        run: |
-          mkdir -p env_zip
-          gdown --id "${{ github.event.inputs.gdrive_file_id }}" -O env_zip/build.zip
-          ls -lh env_zip || true
-          unzip -Z1 env_zip/build.zip | sed 's/^/ZIP: /'
-
-      - name: Unzip and locate executable
-        id: unzipbuild
-        run: |
-          mkdir -p env
-          unzip -q env_zip/build.zip -d env
-          EXE=$(find env -type f -iname "*.x86_64" ! -path "*/__MACOSX/*" | head -n1)
-          if [ -z "$EXE" ]; then
-            echo "Could not find .x86_64 executable"
-            find env -maxdepth 5 -print
-            exit 1
-          fi
-          chmod +x "$EXE"
-          echo "exe_path=$EXE" >> "$GITHUB_OUTPUT"
-          echo "Found executable: $EXE"
-
-      - name: Create probe script
-        run: |
-          cat > probe.py << 'PY'
-import os
-from mlagents_envs.environment import UnityEnvironment
-
-env_path = os.environ.get("ENV_PATH")
-print(f"[Probe] Env: {env_path}")
-env = UnityEnvironment(file_name=env_path, no_graphics=True, timeout_wait=180)
-env.reset()
-names = list(env.behavior_specs.keys())
-print("[Probe] Behaviors:", names)
-for n in names:
-    spec = env.behavior_specs[n]
-    if spec.action_spec.is_discrete():
-        a = spec.action_spec.discrete_branch_sizes
-        atype = "discrete"
-    else:
-        a = spec.action_spec.continuous_size
-        atype = "continuous"
-    obs = [o.shape for o in spec.observation_specs]
-    print(f"[Probe] {n} obs={obs} action_type={atype} action_sizes={a}")
-env.close()
-with open("behavior_names.txt","w") as f:
-    for n in names:
-        f.write(n + "\n")
-PY
-
-      - name: Probe behaviors
-        env:
-          ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
-        run: |
-          python probe.py
-          echo "---- behavior_names.txt ----"
-          cat behavior_names.txt
-
-      - name: Upload probe results
-        uses: actions/upload-artifact@v4
-        with:
-          name: probe-behaviors-${{ github.event.inputs.run_id }}
-          path: behavior_names.txt
-
-      - name: Train
-        if: ${{ steps.resolveyaml.outputs.yaml_path != '' }}
-        env:
-          ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
-        run: |
-          echo "Using YAML: ${{ steps.resolveyaml.outputs.yaml_path }}"
-          mlagents-learn "${{ steps.resolveyaml.outputs.yaml_path }}" \
-            --env="$ENV_PATH" \
-            --run-id="${{ github.event.inputs.run_id }}" \
-            --no-graphics \
-            --time-scale="${{ github.event.inputs.time_scale }}"
-
-      - name: Upload training results
-        if: ${{ steps.resolveyaml.outputs.yaml_path != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: results-${{ github.event.inputs.run_id }}
-          path: results
+# Environment settings
+env_settings:
+  env_path: null  # Will be set by command line argument
+  env_args: null
+  base_port: 5005
+  num_envs: 1
+  num_areas: 1
+  seed: -1
+  
+# Checkpoint settings  
+checkpoint_settings:
+  run_id: "InterceptorTraining"
+  initialize_from: null
+  load_model: false
+  resume: false
+  force: false
+  train_model: true
+  inference: false
+  
+# Engine settings
+engine_settings:
+  width: 84
+  height: 84
+  quality_level: 5
+  time_scale: 20
+  target_frame_rate: -1
+  capture_frame_rate: 60
+  no_graphics: true
