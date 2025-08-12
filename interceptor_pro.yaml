@@ -2,7 +2,7 @@
 # This file should replace your current interceptor_pro.yaml
 
 behaviors:
-  InterceptorBrain:  # This should match your behavior name from Unity
+  "My Behavior":  # This matches the behavior name from Unity: "My Behavior?team=0"
     trainer_type: ppo
     
     hyperparameters:
@@ -35,14 +35,6 @@ behaviors:
     max_steps: 500000
     time_horizon: 64
     summary_freq: 10000
-    
-    # Self-play settings (if applicable for drone vs drone scenarios)
-    # self_play:
-    #   save_steps: 50000
-    #   team_change: 100000
-    #   swap_steps: 10000
-    #   play_against_latest_model_ratio: 0.5
-    #   window: 10
 
 # Environment settings
 env_settings:
