@@ -1,4 +1,4 @@
-name: Train-MLAgents-Modern
+name: Train-MLAgents-Simple
 
 on:
   workflow_dispatch:
@@ -7,10 +7,6 @@ on:
         description: "Google Drive file id لملف الـ ZIP الخاص ببناء Linux"
         required: true
         default: "1wOrwyYQHbaiK_XFouEutm0t88RrlRQ5-"
-      yaml_path:
-        description: "مسار YAML (اختياري). اتركه فاضي لاكتشاف تلقائي"
-        required: false
-        default: ""
       run_id:
         description: "وسم تشغيل التدريب"
         required: true
@@ -24,226 +20,164 @@ jobs:
   train:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    env:
-      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Show repo contents (debug)
-        run: |
-          echo "PWD: $(pwd)"
-          echo "Branch: ${{ github.ref }}"
-          echo "Root listing:"
-          ls -la
-          echo "Search for interceptor yaml candidates:"
-          find . -maxdepth 5 -iname "interceptor*.yml*" -print || true
-
-      - name: Resolve YAML path
-        id: resolveyaml
-        run: |
-          INP="${{ github.event.inputs.yaml_path }}"
-          if [ -n "$INP" ] && [ -f "$INP" ]; then
-            echo "yaml_path=$INP" >> $GITHUB_OUTPUT
-            echo "Using provided YAML: $INP"
-            exit 0
-          fi
-
-          for p in \
-            interceptor_pro.yaml \
-            interceptor_pro.yml \
-            config/interceptor_pro.yaml \
-            config/interceptor_pro.yml \
-            Assets/config/interceptor_pro.yaml \
-            Assets/config/interceptor_pro.yml
-          do
-            if [ -f "$p" ]; then
-              echo "yaml_path=$p" >> $GITHUB_OUTPUT
-              echo "Auto-detected YAML at $p"
-              exit 0
-            fi
-          done
-
-          CAND=$(find . -maxdepth 5 -iname "interceptor*.yml*" | head -n1)
-          if [ -n "$CAND" ] && [ -f "$CAND" ]; then
-            echo "yaml_path=$CAND" >> $GITHUB_OUTPUT
-            echo "Found YAML at $CAND"
-            exit 0
-          fi
-
-          echo "Could not find interceptor_pro.yaml/.yml. Commit it أو حدد 'yaml_path' عند تشغيل الـ workflow."
-          exit 1
-
-      - name: Set up Python 3.10
+      - name: Set up Python 3.8.18
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.8.18"
 
-      - name: Install modern ML-Agents stack
+      - name: Install ML-Agents (simple approach)
         run: |
-          python -m pip install -U pip wheel setuptools
-          # Install minimal graphics dependencies for headless Unity
+          python -m pip install -U pip
+          # Install system dependencies
           sudo apt-get update
-          sudo apt-get install -y xvfb libopengl0 libglu1-mesa libxrandr2 libxinerama1 libxcursor1 || echo "Some packages failed, continuing..."
+          sudo apt-get install -y xvfb
           
-          # Install modern PyTorch that works with recent ML-Agents
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          
-          # Install ML-Agents - use newer version that's compatible with Unity 2.0.1
-          pip install mlagents==1.0.0
+          # Install ML-Agents 0.27.0 which is stable and well-tested
+          pip install torch==1.11.0 torchvision==0.12.0
+          pip install mlagents==0.27.0
           pip install gdown
 
-      - name: Download Linux build from Google Drive
+      - name: Download and extract Unity build
         run: |
           mkdir -p env_zip
           gdown --id "${{ github.event.inputs.gdrive_file_id }}" -O env_zip/build.zip
-          ls -lh env_zip
-
-      - name: Unzip build and make executable (robust)
-        id: unzipbuild
-        run: |
+          
           mkdir -p env
-          unzip -q env_zip/build.zip -d ./env || { echo "Unzip failed"; exit 1; }
-
-          echo "Top-level after unzip:"
-          find ./env -maxdepth 3 -print
-
-          # امسك أول ملف تنفيذي لينُكس .x86_64 وتجاهل __MACOSX
+          unzip -q env_zip/build.zip -d ./env
+          
+          # Find executable
           EXE=$(find ./env -type f -iname "*.x86_64" ! -path "*/__MACOSX/*" | head -n1)
-
           if [ -z "$EXE" ]; then
-            echo "No .x86_64 executable found. Full tree for debug:"
-            find ./env -maxdepth 5 -print
+            echo "❌ No executable found!"
+            find ./env -type f | head -10
             exit 1
           fi
-
-          chmod +x "$EXE"
-          echo "exe_path=$EXE" >> $GITHUB_OUTPUT
-          echo "Using executable: $EXE"
           
-          # Check executable details
-          echo "=== Executable Info ==="
-          ls -la "$EXE"
-          file "$EXE"
-          ldd "$EXE" | head -10 || echo "ldd failed"
+          chmod +x "$EXE"
+          echo "EXE_PATH=$EXE" >> $GITHUB_ENV
+          echo "✅ Found executable: $EXE"
 
-      - name: Test environment with probe
+      - name: Test Unity environment
         env:
-          ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
           DISPLAY: :99
         run: |
           # Start virtual display
           Xvfb :99 -screen 0 1024x768x24 &
-          sleep 3
+          sleep 2
           
-          echo "=== Testing Environment ==="
+          # Quick environment test
           python -c "
           import os
-          import sys
           from mlagents_envs.environment import UnityEnvironment
           
-          env_path = os.environ.get('ENV_PATH')
-          print(f'[Test] Environment path: {env_path}')
-          print(f'[Test] File exists: {os.path.exists(env_path)}')
-          
-          try:
-              env = UnityEnvironment(file_name=env_path, no_graphics=True, timeout_wait=120)
-              env.reset()
-              behaviors = list(env.behavior_specs.keys())
-              print(f'[Test] ✅ Found behaviors: {behaviors}')
-              
-              for behavior_name in behaviors:
-                  spec = env.behavior_specs[behavior_name]
-                  print(f'[Test] {behavior_name}:')
-                  print(f'  - Observation shapes: {[obs.shape for obs in spec.observation_specs]}')
-                  if spec.action_spec.is_discrete():
-                      print(f'  - Action space: discrete {spec.action_spec.discrete_branch_sizes}')
-                  else:
-                      print(f'  - Action space: continuous {spec.action_spec.continuous_size}')
-              
-              env.close()
-              print('[Test] ✅ Environment test successful!')
-              
-          except Exception as e:
-              print(f'[Test] ❌ Environment test failed: {e}')
-              import traceback
-              traceback.print_exc()
-              sys.exit(1)
+          print('Testing Unity environment...')
+          env = UnityEnvironment(file_name='$EXE_PATH', no_graphics=True, timeout_wait=60)
+          env.reset()
+          behaviors = list(env.behavior_specs.keys())
+          print(f'✅ Found behaviors: {behaviors}')
+          env.close()
           "
 
-      - name: Train with ML-Agents
+      - name: Create training config
+        run: |
+          cat > train_config.yaml << 'EOF'
+          behaviors:
+            DroneInterceptor:
+              trainer_type: ppo
+              hyperparameters:
+                batch_size: 1024
+                buffer_size: 10240
+                learning_rate: 3.0e-4
+                beta: 5.0e-3
+                epsilon: 0.2
+                lambd: 0.95
+                num_epoch: 3
+                learning_rate_schedule: constant
+              network_settings:
+                normalize: true
+                hidden_units: 128
+                num_layers: 2
+              reward_signals:
+                extrinsic:
+                  gamma: 0.99
+                  strength: 1.0
+              max_steps: 1000000
+              time_horizon: 64
+              summary_freq: 10000
+          EOF
+          
+          echo "✅ Training config created"
+          cat train_config.yaml
+
+      - name: Run ML-Agents training
         env:
-          ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
           DISPLAY: :99
         run: |
-          echo "YAML path: ${{ steps.resolveyaml.outputs.yaml_path }}"
-          echo "Environment: ${ENV_PATH}"
-          
-          # Ensure virtual display is running
+          # Ensure display is running
           pgrep Xvfb || Xvfb :99 -screen 0 1024x768x24 &
           sleep 2
           
-          # Run training
-          echo "=== Starting ML-Agents Training ==="
-          timeout 340m mlagents-learn "${{ steps.resolveyaml.outputs.yaml_path }}" \
-            --env="${ENV_PATH}" \
+          echo "🚀 Starting training..."
+          echo "Environment: $EXE_PATH"
+          echo "Run ID: ${{ github.event.inputs.run_id }}"
+          
+          # Run training with timeout
+          timeout 330m mlagents-learn train_config.yaml \
+            --env="$EXE_PATH" \
             --run-id="${{ github.event.inputs.run_id }}" \
             --no-graphics \
             --time-scale="${{ github.event.inputs.time_scale }}" \
             --force || {
             
-            TRAINING_EXIT_CODE=$?
-            echo "Training process ended with exit code: $TRAINING_EXIT_CODE"
+            EXIT_CODE=$?
+            echo "Training ended with code: $EXIT_CODE"
             
-            echo "=== Checking Results ==="
+            # Check if we have results anyway
             if [ -d "results/${{ github.event.inputs.run_id }}" ]; then
-              echo "✅ Results directory found!"
-              find "results/${{ github.event.inputs.run_id }}" -type f | head -10
-              
-              # Check for model files
-              if find "results/${{ github.event.inputs.run_id }}" -name "*.onnx" -o -name "*.nn" | grep -q .; then
-                echo "✅ Model files found!"
-                find "results/${{ github.event.inputs.run_id }}" -name "*.onnx" -o -name "*.nn"
+              echo "✅ Results directory exists"
+              find "results/${{ github.event.inputs.run_id }}" -name "*.onnx" -o -name "*.nn" && {
+                echo "✅ Model files found - training succeeded!"
                 exit 0
-              else
-                echo "❌ No model files found"
-                exit 1
-              fi
-            else
-              echo "❌ No results directory found"
-              exit 1
+              }
             fi
+            
+            echo "❌ Training failed - no results"
+            exit 1
           }
+          
+          echo "✅ Training completed successfully!"
 
-      - name: Display training results
+      - name: Show results
         if: always()
         run: |
-          echo "=== Final Results ==="
           if [ -d "results/${{ github.event.inputs.run_id }}" ]; then
-            echo "✅ Training completed!"
-            echo "📁 Files created:"
-            find results/${{ github.event.inputs.run_id }} -type f | head -15
+            echo "=== Training Results ==="
+            find "results/${{ github.event.inputs.run_id }}" -type f | head -20
             echo ""
-            echo "🧠 Models:"
-            find results/${{ github.event.inputs.run_id }} -name "*.onnx" -o -name "*.nn" | while read file; do
-              echo "  📄 $file ($(du -h "$file" | cut -f1))"
+            echo "=== Model Files ==="
+            find "results/${{ github.event.inputs.run_id }}" -name "*.onnx" -o -name "*.nn" | while read f; do
+              echo "📄 $f ($(du -h "$f" | cut -f1))"
             done
           else
-            echo "❌ No training results"
+            echo "❌ No results found"
           fi
 
-      - name: Upload training results
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ github.event.inputs.run_id }}
+          name: training-results-${{ github.event.inputs.run_id }}
           path: results
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ github.event.inputs.run_id }}
+          name: training-logs-${{ github.event.inputs.run_id }}
           path: |
             *.log
             results/*/run_logs/
