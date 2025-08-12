@@ -5,58 +5,101 @@ on:
     inputs:
       gdrive_file_id:
         description: "Google Drive file id of your Linux build ZIP"
+        required: true
         default: "1wOrwyYQHbaiK_XFouEutm0t88RrlRQ5-"
-        required: true
       yaml_path:
-        description: "Training YAML path in repo"
-        default: "interceptor_pro.yaml"
-        required: true
+        description: "Optional explicit path to YAML (leave empty to auto-detect)"
+        required: false
+        default: ""
       run_id:
         description: "Run ID label"
-        default: "drone_run_001"
         required: true
+        default: "drone_run_001"
       time_scale:
         description: "Unity time scale (higher = faster)"
-        default: "20"
         required: true
+        default: "20"
 
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # 6h per job (GitHub hosted)
+    timeout-minutes: 360
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Ensure YAML exists
+      - name: Show repo contents (debug)
         run: |
-          if [ ! -f "${{ github.event.inputs.yaml_path }}" ]; then
-            echo "YAML not found at '${{ github.event.inputs.yaml_path }}' — commit it to the repo root or update the input."
-            exit 1
+          echo "PWD: $(pwd)"
+          echo "Branch: ${{ github.ref }}"
+          echo "Root listing:"
+          ls -la
+          echo "Search for interceptor yaml candidates:"
+          find . -maxdepth 5 -iname "interceptor*.yml*" -print || true
+
+      - name: Resolve YAML path
+        id: resolveyaml
+        run: |
+          # 1) If user provided input and it exists, use it
+          INP="${{ github.event.inputs.yaml_path }}"
+          if [ -n "$INP" ] && [ -f "$INP" ]; then
+            echo "yaml_path=$INP" >> $GITHUB_OUTPUT
+            echo "Using provided YAML: $INP"
+            exit 0
           fi
 
-      - name: Set up Python 3.10.8 (matches mlagents 0.30.0)
+          # 2) Try common names/locations
+          for p in \
+            interceptor_pro.yaml \
+            interceptor_pro.yml \
+            config/interceptor_pro.yaml \
+            config/interceptor_pro.yml \
+            Assets/config/interceptor_pro.yaml \
+            Assets/config/interceptor_pro.yml
+          do
+            if [ -f "$p" ]; then
+              echo "yaml_path=$p" >> $GITHUB_OUTPUT
+              echo "Auto-detected YAML at $p"
+              exit 0
+            fi
+          done
+
+          # 3) Fallback: any interceptor*.yml*
+          CAND=$(find . -maxdepth 5 -iname "interceptor*.yml*" | head -n1)
+          if [ -n "$CAND" ] && [ -f "$CAND" ]; then
+            echo "yaml_path=$CAND" >> $GITHUB_OUTPUT
+            echo "Found YAML at $CAND"
+            exit 0
+          fi
+
+          echo "Could not find interceptor_pro.yaml/.yml. Commit it or provide 'yaml_path' when running the workflow."
+          exit 1
+
+      - name: Set up Python 3.10.8 (compatible with mlagents 0.30.0)
         uses: actions/setup-python@v5
         with:
           python-version: "3.10.8"
 
-      - name: Install trainer + gdown
+      - name: Install trainer + tools
         run: |
           python -m pip install -U pip
           pip install "mlagents==0.30.0" "tensorboard==2.14.0" gdown
 
-      - name: Download Linux headless build from Google Drive
+      - name: Download Linux build from Google Drive
         run: |
           mkdir -p env_zip
           gdown --id "${{ github.event.inputs.gdrive_file_id }}" -O env_zip/build.zip
+          ls -lh env_zip
 
-      - name: Unzip and make executable
+      - name: Unzip build and make executable
         run: |
           mkdir -p env
           unzip -q env_zip/build.zip -d ./env
           chmod +x $(find ./env -name "*.x86_64" || true)
-          echo "Found executables:"
+          echo "Executables found:"
           find ./env -name "*.x86_64" -print || true
+          echo "Top-level of env:"
+          ls -la ./env || true
 
       - name: Locate executable
         id: findexe
@@ -67,16 +110,18 @@ jobs:
             exit 1
           fi
           echo "exe_path=$EXE" >> $GITHUB_OUTPUT
-          echo "Using $EXE"
+          echo "Using executable: $EXE"
 
       - name: Train (CPU)
         env:
           ENV_PATH: ${{ steps.findexe.outputs.exe_path }}
         run: |
-          mlagents-learn "${{ github.event.inputs.yaml_path }}" \
+          echo "YAML path resolved to: ${{ steps.resolveyaml.outputs.yaml_path }}"
+          mlagents-learn "${{ steps.resolveyaml.outputs.yaml_path }}" \
             --env="${ENV_PATH}" \
             --run-id="${{ github.event.inputs.run_id }}" \
-            --no-graphics --time-scale="${{ github.event.inputs.time_scale }}"
+            --no-graphics \
+            --time-scale="${{ github.event.inputs.time_scale }}"
 
       - name: Upload training results
         uses: actions/upload-artifact@v4
