@@ -28,7 +28,7 @@ behaviors:
         
     behavioral_cloning:
       demo_path: null
-      strength: 0.5
+      strength: 0.0
       steps: 0
       
     keep_checkpoints: 5
