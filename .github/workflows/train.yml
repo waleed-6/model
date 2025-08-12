@@ -394,4 +394,3 @@ EOF
             results/
             *.yaml
             *.log
-            config/
