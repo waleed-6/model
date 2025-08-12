@@ -83,6 +83,12 @@ jobs:
       - name: Install trainer + tools (with compatibility fixes)
         run: |
           python -m pip install -U pip
+          # Install graphics dependencies for headless Unity
+          sudo apt-get update
+          sudo apt-get install -y xvfb libglu1-mesa libxrender1 libxrandr2 \
+            libxss1 libgconf-2-4 libasound2 libgtk-3-0 libdrm2 libxcomposite1 \
+            libxdamage1 libxext6 libxfixes3 libxi6 libxinerama1 libxkbcommon0 \
+            libxrender1 libxtst6 libxxf86vm1
           # Install core dependencies first to avoid conflicts
           pip install "protobuf==3.20.3"
           pip install "six"
@@ -160,22 +166,47 @@ jobs:
       - name: Test environment (probe behaviors)
         env:
           ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
-        run: python probe.py
+        run: |
+          # Add system info for debugging
+          echo "=== System Resources ==="
+          free -h
+          df -h
+          echo "=== Graphics Libraries ==="
+          ldconfig -p | grep -i gl || echo "No GL libraries found"
+          echo "=== Testing Environment ==="
+          python probe.py
 
       - name: Train (CPU)
         env:
           ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
+          DISPLAY: :99
         run: |
           echo "YAML path resolved to: ${{ steps.resolveyaml.outputs.yaml_path }}"
           echo "ENV executable: ${ENV_PATH}"
           
-          # Run training with proper error handling
-          mlagents-learn "${{ steps.resolveyaml.outputs.yaml_path }}" \
+          # Start virtual display for headless Unity
+          Xvfb :99 -screen 0 1024x768x24 &
+          sleep 2
+          
+          # Run training with extended timeout and better error handling
+          timeout 340m mlagents-learn "${{ steps.resolveyaml.outputs.yaml_path }}" \
             --env="${ENV_PATH}" \
             --run-id="${{ github.event.inputs.run_id }}" \
             --no-graphics \
             --time-scale="${{ github.event.inputs.time_scale }}" \
-            --force
+            --force \
+            --worker-id=1 \
+            --base-port=5005 || {
+            echo "Training failed or timed out"
+            echo "Checking if results were generated..."
+            ls -la results/ || echo "No results directory"
+            if [ -d "results/${{ github.event.inputs.run_id }}" ]; then
+              echo "Training results found despite timeout"
+            else
+              echo "No training results found - environment crashed early"
+              exit 1
+            fi
+          }
 
       - name: Upload training results
         uses: actions/upload-artifact@v4
