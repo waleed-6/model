@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       gdrive_file_id:
-        description: "Google Drive file id لملف الـ ZIP الخاص ببناء Linux"
+        description: "Google Drive file id لملف ZIP الخاص ببناء Linux"
         required: true
         default: "1wOrwyYQHbaiK_XFouEutm0t88RrlRQ5-"
       yaml_path:
@@ -25,6 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
+    env:
+      # احتياطي: نفّذ البروتوبف بـ Python لو حصل أي تضارب
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -33,7 +37,6 @@ jobs:
         run: |
           echo "PWD: $(pwd)"
           echo "Branch: ${{ github.ref }}"
-          echo "Root listing:"
           ls -la
           echo "Search for interceptor yaml candidates:"
           find . -maxdepth 5 -iname "interceptor*.yml*" -print || true
@@ -78,10 +81,18 @@ jobs:
         with:
           python-version: "3.10.8"
 
-      - name: Install trainer + tools
+      - name: Install trainer + tools (pin protobuf)
         run: |
           python -m pip install -U pip
-          pip install "mlagents==0.30.0" "tensorboard==2.14.0" gdown
+          # تثبيت نسخ متوافقة
+          pip install "protobuf==3.20.3"
+          pip install "mlagents==0.30.0" "mlagents_envs==0.30.0"
+          pip install "tensorboard==2.14.0" gdown
+          python -c "import sys, pkgutil; print('PY', sys.version); 
+from importlib.metadata import version as V; 
+print('mlagents', V('mlagents')); 
+print('mlagents_envs', V('mlagents_envs')); 
+print('protobuf', V('protobuf'))"
 
       - name: Download Linux build from Google Drive
         run: |
