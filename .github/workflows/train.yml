@@ -30,16 +30,14 @@ jobs:
     timeout-minutes: 360
 
     env:
-      # Fix protobuf issues
       PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
-      # Prevent Unity from hanging
       DISPLAY: ":99"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup virtual display (for Unity headless)
+      - name: Setup virtual display
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb
@@ -54,7 +52,7 @@ jobs:
           echo "Looking for interceptor configs:"
           find . -maxdepth 5 -iname "*interceptor*" -type f -print || echo "No interceptor files found"
 
-      - name: Set up Python 3.9 (better ML-Agents compatibility)
+      - name: Set up Python 3.9
         uses: actions/setup-python@v5
         with:
           python-version: "3.9"
@@ -62,13 +60,11 @@ jobs:
       - name: Install ML-Agents and dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install specific versions for compatibility
           pip install torch==1.13.1 torchvision==0.14.1 --extra-index-url https://download.pytorch.org/whl/cpu
           pip install "protobuf==3.20.3"
           pip install "mlagents==0.30.0"
           pip install "tensorboard==2.11.2"
           pip install gdown requests
-          # Verify installation
           python -c "import mlagents; print(f'ML-Agents version: {mlagents.__version__}')"
           mlagents-learn --help > /dev/null && echo "mlagents-learn command available"
 
@@ -77,14 +73,12 @@ jobs:
         run: |
           USER_YAML="${{ github.event.inputs.yaml_path }}"
           
-          # Check if user provided a valid YAML path
           if [[ -n "$USER_YAML" && -f "$USER_YAML" ]]; then
             echo "yaml_path=$USER_YAML" >> $GITHUB_OUTPUT
             echo "Using user-specified YAML: $USER_YAML"
             exit 0
           fi
           
-          # Search for configuration files in common locations
           SEARCH_PATHS=(
             "interceptor_pro.yaml"
             "interceptor_pro.yml"
@@ -104,7 +98,6 @@ jobs:
             fi
           done
           
-          # Try to find any interceptor config file
           FOUND_CONFIG=$(find . -maxdepth 5 -iname "*interceptor*.yml*" -type f | head -n1)
           if [[ -n "$FOUND_CONFIG" ]]; then
             echo "yaml_path=$FOUND_CONFIG" >> $GITHUB_OUTPUT
@@ -112,7 +105,6 @@ jobs:
             exit 0
           fi
           
-          # No config found - will create a basic one or run probe only
           echo "yaml_path=" >> $GITHUB_OUTPUT
           echo "No training configuration found - will run environment probe only"
 
@@ -122,7 +114,6 @@ jobs:
           mkdir -p env_download
           cd env_download
           
-          # Download with retry logic
           for i in {1..3}; do
             if gdown --id "${{ github.event.inputs.gdrive_file_id }}" -O build.zip; then
               echo "Download successful on attempt $i"
@@ -133,7 +124,6 @@ jobs:
             fi
           done
           
-          # Verify download
           if [[ ! -f "build.zip" ]]; then
             echo "Failed to download build.zip after 3 attempts"
             exit 1
@@ -142,7 +132,6 @@ jobs:
           echo "Downloaded file info:"
           ls -lh build.zip
           
-          # Check if it's a valid zip file
           if ! unzip -t build.zip > /dev/null 2>&1; then
             echo "Downloaded file is not a valid ZIP archive"
             file build.zip
@@ -156,13 +145,11 @@ jobs:
           mkdir -p unity_env
           cd unity_env
           
-          # Extract build
           unzip -q ../env_download/build.zip
           
           echo "Contents after extraction:"
           find . -maxdepth 3 -type f -print
           
-          # Find the executable (ignore macOS metadata)
           EXECUTABLE=$(find . -type f -name "*.x86_64" ! -path "*/__MACOSX/*" ! -path "*/._*" | head -n1)
           
           if [[ -z "$EXECUTABLE" ]]; then
@@ -172,13 +159,11 @@ jobs:
             exit 1
           fi
           
-          # Make executable and get absolute path
           chmod +x "$EXECUTABLE"
           ABS_PATH=$(realpath "$EXECUTABLE")
           echo "exe_path=$ABS_PATH" >> $GITHUB_OUTPUT
           echo "Unity executable prepared: $ABS_PATH"
           
-          # Verify executable
           if [[ ! -x "$ABS_PATH" ]]; then
             echo "Error: Executable is not properly set up"
             exit 1
@@ -191,13 +176,11 @@ jobs:
         run: |
           echo "Probing Unity environment: $UNITY_ENV"
           
-          # Create probe script
           cat > probe_env.py << 'EOF'
 import os
 import sys
 import json
 from mlagents_envs.environment import UnityEnvironment
-from mlagents_envs.exception import UnityTimeoutException, UnityWorkerInUseException
 
 def probe_environment():
     env_path = os.environ.get("UNITY_ENV")
@@ -208,7 +191,6 @@ def probe_environment():
     print(f"Probing Unity environment: {env_path}")
     
     try:
-        # Initialize environment with timeout
         env = UnityEnvironment(
             file_name=env_path,
             no_graphics=True,
@@ -216,10 +198,8 @@ def probe_environment():
             seed=42
         )
         
-        # Reset environment to get behavior specs
         env.reset()
         
-        # Get behavior information
         behavior_names = list(env.behavior_specs.keys())
         print(f"Found {len(behavior_names)} behavior(s): {behavior_names}")
         
@@ -227,10 +207,8 @@ def probe_environment():
         for name in behavior_names:
             spec = env.behavior_specs[name]
             
-            # Get observation info
             obs_shapes = [obs_spec.shape for obs_spec in spec.observation_specs]
             
-            # Get action info
             if spec.action_spec.is_continuous():
                 action_info = {
                     "type": "continuous", 
@@ -251,7 +229,6 @@ def probe_environment():
             print(f"  Observations: {obs_shapes}")
             print(f"  Actions: {action_info}")
         
-        # Save behavior info
         with open("behavior_specs.json", "w") as f:
             json.dump(behavior_info, f, indent=2)
             
@@ -263,11 +240,8 @@ def probe_environment():
         print("Environment probe completed successfully")
         return True
         
-    except (UnityTimeoutException, UnityWorkerInUseException) as e:
-        print(f"Unity environment error: {e}")
-        return False
     except Exception as e:
-        print(f"Unexpected error during probe: {e}")
+        print(f"Error during probe: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -277,10 +251,8 @@ if __name__ == "__main__":
     sys.exit(0 if success else 1)
 EOF
           
-          # Run probe
           python probe_env.py
           
-          # Display results
           if [[ -f "behavior_specs.json" ]]; then
             echo "Behavior specifications:"
             cat behavior_specs.json
@@ -291,16 +263,15 @@ EOF
         run: |
           echo "No training config found, creating default configuration..."
           
-          # Read first behavior name
           if [[ -f "behavior_names.txt" ]]; then
             BEHAVIOR_NAME=$(head -n1 behavior_names.txt | tr -d '\n\r')
           else
             BEHAVIOR_NAME="DroneAgent"
           fi
           
-          cat > default_config.yaml << EOF
+          cat > default_config.yaml << 'EOF'
 behaviors:
-  $BEHAVIOR_NAME:
+  BEHAVIOR_NAME_PLACEHOLDER:
     trainer_type: ppo
     hyperparameters:
       batch_size: 1024
@@ -319,17 +290,14 @@ behaviors:
       extrinsic:
         gamma: 0.99
         strength: 1.0
-    max_steps: ${{ github.event.inputs.max_steps }}
+    max_steps: MAX_STEPS_PLACEHOLDER
     time_horizon: 64
     summary_freq: 10000
     threaded: true
-    self_play:
-      save_steps: 50000
-      team_change: 100000
-      swap_steps: 10000
-      play_against_latest_model_ratio: 0.5
-      window: 10
 EOF
+          
+          sed -i "s/BEHAVIOR_NAME_PLACEHOLDER/$BEHAVIOR_NAME/g" default_config.yaml
+          sed -i "s/MAX_STEPS_PLACEHOLDER/${{ github.event.inputs.max_steps }}/g" default_config.yaml
           
           echo "yaml_path=default_config.yaml" >> $GITHUB_OUTPUT
           echo "Created default training configuration for behavior: $BEHAVIOR_NAME"
@@ -343,7 +311,7 @@ EOF
             behavior_specs.json
 
       - name: Start ML-Agents training
-        if: ${{ steps.resolve_config.outputs.yaml_path != '' || steps.resolve_config.outputs.yaml_path == 'default_config.yaml' }}
+        if: ${{ steps.resolve_config.outputs.yaml_path != '' }}
         env:
           UNITY_ENV: ${{ steps.prepare_build.outputs.exe_path }}
         run: |
@@ -357,7 +325,6 @@ EOF
           echo "Run ID: ${{ github.event.inputs.run_id }}"
           echo "Time scale: ${{ github.event.inputs.time_scale }}"
           
-          # Verify config file exists
           if [[ ! -f "$CONFIG_FILE" ]]; then
             echo "Error: Training configuration file '$CONFIG_FILE' not found"
             exit 1
@@ -366,7 +333,6 @@ EOF
           echo "Training configuration:"
           cat "$CONFIG_FILE"
           
-          # Start training with proper error handling
           mlagents-learn "$CONFIG_FILE" \
             --env="$UNITY_ENV" \
             --run-id="${{ github.event.inputs.run_id }}" \
@@ -374,18 +340,9 @@ EOF
             --time-scale="${{ github.event.inputs.time_scale }}" \
             --width=84 \
             --height=84 \
-            --quality-level=0 \
-            || {
-              echo "Training failed. Checking for common issues..."
-              # Check if results directory was created
-              if [[ -d "results" ]]; then
-                echo "Results directory exists, training may have started:"
-                find results -type f -name "*.txt" -o -name "*.log" | xargs cat
-              fi
-              exit 1
-            }
+            --quality-level=0
 
-      - name: Upload training results and logs
+      - name: Upload training results
         if: always()
         uses: actions/upload-artifact@v4
         with:
