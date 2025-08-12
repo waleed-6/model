@@ -95,7 +95,8 @@ jobs:
           pip install "torch==1.13.1"
           pip install "tensorboard==2.11.2"
           # Install ML-Agents compatible with Unity ML-Agents 2.0.1
-          pip install "mlagents==0.30.0" "mlagents_envs==0.30.0"
+          # Unity 2.0.1 is compatible with Python mlagents ~0.28.0-0.30.0
+          pip install "mlagents==0.28.0" "mlagents_envs==0.28.0"
           pip install gdown
 
       - name: Download Linux build from Google Drive
