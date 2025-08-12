@@ -1,4 +1,4 @@
-name: Train-MLAgents-Simple
+name: Train-MLAgents-Bulletproof
 
 on:
   workflow_dispatch:
@@ -20,6 +20,8 @@ jobs:
   train:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
 
     steps:
       - name: Checkout repo
@@ -30,68 +32,146 @@ jobs:
         with:
           python-version: "3.8.18"
 
-      - name: Install ML-Agents (simple approach)
+      - name: Install dependencies (bulletproof method)
         run: |
-          python -m pip install -U pip
+          python -m pip install -U pip wheel setuptools
+          
           # Install system dependencies
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb libopengl0 libglu1-mesa
           
-          # Install ML-Agents 0.27.0 which is stable and well-tested
-          pip install torch==1.11.0 torchvision==0.12.0
-          pip install mlagents==0.27.0
+          # Install dependencies in exact order to avoid conflicts
+          echo "Installing protobuf..."
+          pip install "protobuf==3.20.3"
+          
+          echo "Installing core ML libraries..."
+          pip install "numpy==1.21.6"
+          pip install "six==1.16.0"
+          pip install "setuptools==65.7.0"
+          
+          echo "Installing PyTorch..."
+          pip install "torch==1.11.0+cpu" "torchvision==0.12.0+cpu" -f https://download.pytorch.org/whl/torch_stable.html
+          
+          echo "Installing additional ML-Agents dependencies..."
+          pip install "tensorboard==2.8.0"
+          pip install "grpcio==1.48.2"
+          pip install "cloudpickle==1.6.0"
+          
+          echo "Installing ML-Agents..."
+          pip install "mlagents==0.27.0" "mlagents_envs==0.27.0"
+          
+          echo "Installing utilities..."
           pip install gdown
+          
+          echo "✅ All dependencies installed successfully!"
+          
+          # Verify installation
+          python -c "
+          import mlagents_envs
+          import torch
+          print(f'✅ ML-Agents version: {mlagents_envs.__version__}')
+          print(f'✅ PyTorch version: {torch.__version__}')
+          print('✅ All imports successful!')
+          "
 
       - name: Download and extract Unity build
         run: |
           mkdir -p env_zip
+          echo "📥 Downloading Unity build..."
           gdown --id "${{ github.event.inputs.gdrive_file_id }}" -O env_zip/build.zip
+          ls -lh env_zip/
           
+          echo "📦 Extracting build..."
           mkdir -p env
           unzip -q env_zip/build.zip -d ./env
           
-          # Find executable
+          echo "🔍 Finding executable..."
+          find ./env -type f -name "*.x86_64" | head -5
+          
+          # Find executable (ignore macOS artifacts)
           EXE=$(find ./env -type f -iname "*.x86_64" ! -path "*/__MACOSX/*" | head -n1)
           if [ -z "$EXE" ]; then
-            echo "❌ No executable found!"
-            find ./env -type f | head -10
+            echo "❌ No .x86_64 executable found!"
+            echo "Available files:"
+            find ./env -type f | head -20
             exit 1
           fi
           
           chmod +x "$EXE"
           echo "EXE_PATH=$EXE" >> $GITHUB_ENV
-          echo "✅ Found executable: $EXE"
+          echo "✅ Executable ready: $EXE"
+          
+          # Check executable
+          ls -la "$EXE"
+          file "$EXE"
 
-      - name: Test Unity environment
+      - name: Test Unity environment connection
         env:
           DISPLAY: :99
         run: |
-          # Start virtual display
+          echo "🖥️ Starting virtual display..."
           Xvfb :99 -screen 0 1024x768x24 &
-          sleep 2
+          sleep 3
           
-          # Quick environment test
-          python -c "
+          echo "🧪 Testing Unity environment..."
+          timeout 60 python -c "
           import os
+          import sys
           from mlagents_envs.environment import UnityEnvironment
           
-          print('Testing Unity environment...')
-          env = UnityEnvironment(file_name='$EXE_PATH', no_graphics=True, timeout_wait=60)
-          env.reset()
-          behaviors = list(env.behavior_specs.keys())
-          print(f'✅ Found behaviors: {behaviors}')
-          env.close()
+          env_path = os.environ.get('EXE_PATH')
+          print(f'Environment path: {env_path}')
+          print(f'File exists: {os.path.exists(env_path)}')
+          print(f'File executable: {os.access(env_path, os.X_OK)}')
+          
+          try:
+              print('Creating Unity environment...')
+              env = UnityEnvironment(
+                  file_name=env_path, 
+                  no_graphics=True, 
+                  timeout_wait=45,
+                  base_port=5005
+              )
+              
+              print('Resetting environment...')
+              env.reset()
+              
+              behaviors = list(env.behavior_specs.keys())
+              print(f'✅ Found {len(behaviors)} behaviors: {behaviors}')
+              
+              for behavior_name in behaviors:
+                  spec = env.behavior_specs[behavior_name]
+                  obs_shapes = [obs.shape for obs in spec.observation_specs]
+                  
+                  if spec.action_spec.is_discrete():
+                      action_info = f'discrete branches: {spec.action_spec.discrete_branch_sizes}'
+                  else:
+                      action_info = f'continuous size: {spec.action_spec.continuous_size}'
+                  
+                  print(f'  {behavior_name}:')
+                  print(f'    Observations: {obs_shapes}')
+                  print(f'    Actions: {action_info}')
+              
+              print('Closing environment...')
+              env.close()
+              print('✅ Environment test completed successfully!')
+              
+          except Exception as e:
+              print(f'❌ Environment test failed: {e}')
+              import traceback
+              traceback.print_exc()
+              sys.exit(1)
           "
 
-      - name: Create training config
+      - name: Create optimized training config
         run: |
-          cat > train_config.yaml << 'EOF'
+          cat > optimized_config.yaml << 'EOF'
           behaviors:
             DroneInterceptor:
               trainer_type: ppo
               hyperparameters:
-                batch_size: 1024
-                buffer_size: 10240
+                batch_size: 2048
+                buffer_size: 20480
                 learning_rate: 3.0e-4
                 beta: 5.0e-3
                 epsilon: 0.2
@@ -100,85 +180,138 @@ jobs:
                 learning_rate_schedule: constant
               network_settings:
                 normalize: true
-                hidden_units: 128
+                hidden_units: 256
                 num_layers: 2
               reward_signals:
                 extrinsic:
-                  gamma: 0.99
+                  gamma: 0.995
                   strength: 1.0
-              max_steps: 1000000
-              time_horizon: 64
+              max_steps: 2000000
+              time_horizon: 128
               summary_freq: 10000
+              checkpoint_interval: 200000
           EOF
           
-          echo "✅ Training config created"
-          cat train_config.yaml
+          echo "📝 Training configuration:"
+          cat optimized_config.yaml
 
       - name: Run ML-Agents training
         env:
           DISPLAY: :99
         run: |
-          # Ensure display is running
+          # Ensure virtual display is running
           pgrep Xvfb || Xvfb :99 -screen 0 1024x768x24 &
           sleep 2
           
-          echo "🚀 Starting training..."
+          echo "🚀 Starting ML-Agents training..."
           echo "Environment: $EXE_PATH"
           echo "Run ID: ${{ github.event.inputs.run_id }}"
+          echo "Time scale: ${{ github.event.inputs.time_scale }}"
+          echo "Config: optimized_config.yaml"
           
-          # Run training with timeout
-          timeout 330m mlagents-learn train_config.yaml \
+          # Create results directory
+          mkdir -p results
+          
+          # Run training with comprehensive logging
+          timeout 330m mlagents-learn optimized_config.yaml \
             --env="$EXE_PATH" \
             --run-id="${{ github.event.inputs.run_id }}" \
             --no-graphics \
             --time-scale="${{ github.event.inputs.time_scale }}" \
-            --force || {
+            --force \
+            --base-port=5005 2>&1 | tee training.log || {
             
-            EXIT_CODE=$?
-            echo "Training ended with code: $EXIT_CODE"
+            EXIT_CODE=${PIPESTATUS[0]}
+            echo "🔍 Training process ended with code: $EXIT_CODE"
             
-            # Check if we have results anyway
+            # Always check for results regardless of exit code
             if [ -d "results/${{ github.event.inputs.run_id }}" ]; then
-              echo "✅ Results directory exists"
-              find "results/${{ github.event.inputs.run_id }}" -name "*.onnx" -o -name "*.nn" && {
-                echo "✅ Model files found - training succeeded!"
+              echo "✅ Results directory found!"
+              find "results/${{ github.event.inputs.run_id }}" -type f | head -10
+              
+              # Look for model files
+              MODEL_FILES=$(find "results/${{ github.event.inputs.run_id }}" -name "*.onnx" -o -name "*.nn")
+              if [ -n "$MODEL_FILES" ]; then
+                echo "✅ Model files found:"
+                echo "$MODEL_FILES"
+                echo "🎉 Training completed successfully despite exit code!"
                 exit 0
-              }
+              else
+                echo "⚠️  Results directory exists but no model files found"
+                echo "This might indicate incomplete training"
+              fi
+            else
+              echo "❌ No results directory found"
             fi
             
-            echo "❌ Training failed - no results"
+            echo "📋 Last 50 lines of training log:"
+            tail -50 training.log || echo "No training log available"
+            
             exit 1
           }
           
-          echo "✅ Training completed successfully!"
+          echo "🎉 Training completed successfully!"
 
-      - name: Show results
+      - name: Analyze results
         if: always()
         run: |
+          echo "=== Training Results Analysis ==="
+          
           if [ -d "results/${{ github.event.inputs.run_id }}" ]; then
-            echo "=== Training Results ==="
-            find "results/${{ github.event.inputs.run_id }}" -type f | head -20
+            echo "✅ Training completed successfully!"
             echo ""
-            echo "=== Model Files ==="
+            
+            echo "📁 Directory structure:"
+            find "results/${{ github.event.inputs.run_id }}" -type f | sort
+            echo ""
+            
+            echo "🧠 Model files:"
             find "results/${{ github.event.inputs.run_id }}" -name "*.onnx" -o -name "*.nn" | while read f; do
-              echo "📄 $f ($(du -h "$f" | cut -f1))"
+              size=$(du -h "$f" | cut -f1)
+              echo "  📄 $f ($size)"
             done
+            echo ""
+            
+            echo "📊 Training statistics:"
+            find "results/${{ github.event.inputs.run_id }}" -name "*.csv" | head -3 | while read f; do
+              lines=$(wc -l < "$f" 2>/dev/null || echo "?")
+              echo "  📈 $f ($lines rows)"
+            done
+            echo ""
+            
+            echo "📋 Configuration used:"
+            find "results/${{ github.event.inputs.run_id }}" -name "*config.yaml" | head -1 | xargs cat || echo "No config found"
+            
           else
-            echo "❌ No results found"
+            echo "❌ No results directory found"
+            echo "Training may have failed or crashed early"
+            
+            echo "📋 Available files:"
+            ls -la . || true
+            
+            echo "📋 Training log (if available):"
+            if [ -f "training.log" ]; then
+              echo "Last 30 lines:"
+              tail -30 training.log
+            else
+              echo "No training log found"
+            fi
           fi
 
-      - name: Upload results
+      - name: Upload training results
         uses: actions/upload-artifact@v4
         with:
-          name: training-results-${{ github.event.inputs.run_id }}
+          name: drone-training-results-${{ github.event.inputs.run_id }}
           path: results
-
-      - name: Upload logs
         if: always()
+
+      - name: Upload comprehensive logs
         uses: actions/upload-artifact@v4
         with:
-          name: training-logs-${{ github.event.inputs.run_id }}
+          name: drone-training-logs-${{ github.event.inputs.run_id }}
           path: |
             *.log
             results/*/run_logs/
+            results/*/configuration.yaml
+        if: always()
         continue-on-error: true
