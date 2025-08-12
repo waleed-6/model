@@ -24,6 +24,8 @@ jobs:
   train:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
 
     steps:
       - name: Checkout repo
@@ -78,10 +80,14 @@ jobs:
         with:
           python-version: "3.10.8"
 
-      - name: Install trainer + tools
+      - name: Install trainer + tools (with protobuf fix)
         run: |
           python -m pip install -U pip
-          pip install "mlagents==0.30.0" "tensorboard==2.14.0" gdown
+          # Install specific protobuf version first to avoid conflicts
+          pip install "protobuf==3.20.3"
+          # Install ML-Agents with specific versions
+          pip install "mlagents==0.30.0" "mlagents_envs==0.30.0"
+          pip install "tensorboard==2.14.0" gdown
 
       - name: Download Linux build from Google Drive
         run: |
@@ -111,20 +117,72 @@ jobs:
           echo "exe_path=$EXE" >> $GITHUB_OUTPUT
           echo "Using executable: $EXE"
 
+      - name: Create probe script (debug behaviors)
+        run: |
+          cat > probe.py << 'EOF'
+import os
+import sys
+from mlagents_envs.environment import UnityEnvironment
+
+env_path = os.environ.get("ENV_PATH")
+print(f"[Probe] Testing environment: {env_path}")
+
+try:
+    env = UnityEnvironment(file_name=env_path, no_graphics=True, timeout_wait=180)
+    env.reset()
+    names = list(env.behavior_specs.keys())
+    print(f"[Probe] Found behaviors: {names}")
+    
+    for name in names:
+        spec = env.behavior_specs[name]
+        if spec.action_spec.is_discrete():
+            action_info = f"discrete branches: {spec.action_spec.discrete_branch_sizes}"
+        else:
+            action_info = f"continuous size: {spec.action_spec.continuous_size}"
+        
+        obs_shapes = [obs.shape for obs in spec.observation_specs]
+        print(f"[Probe] {name}: observations={obs_shapes}, {action_info}")
+    
+    env.close()
+    print("[Probe] Environment test successful!")
+    
+except Exception as e:
+    print(f"[Probe] Error testing environment: {e}")
+    sys.exit(1)
+EOF
+
+      - name: Test environment (probe behaviors)
+        env:
+          ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
+        run: python probe.py
+
       - name: Train (CPU)
         env:
           ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
         run: |
           echo "YAML path resolved to: ${{ steps.resolveyaml.outputs.yaml_path }}"
           echo "ENV executable: ${ENV_PATH}"
+          
+          # Run training with proper error handling
           mlagents-learn "${{ steps.resolveyaml.outputs.yaml_path }}" \
             --env="${ENV_PATH}" \
             --run-id="${{ github.event.inputs.run_id }}" \
             --no-graphics \
-            --time-scale="${{ github.event.inputs.time_scale }}"
+            --time-scale="${{ github.event.inputs.time_scale }}" \
+            --force
 
       - name: Upload training results
         uses: actions/upload-artifact@v4
         with:
           name: results-${{ github.event.inputs.run_id }}
           path: results
+
+      - name: Upload logs (for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.event.inputs.run_id }}
+          path: |
+            *.log
+            results/*/run_logs/
+        continue-on-error: true
