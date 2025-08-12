@@ -390,7 +390,4 @@ EOF
         uses: actions/upload-artifact@v4
         with:
           name: training-results-${{ github.event.inputs.run_id }}
-          path: |
-            results/
-            *.yaml
-            *.log
+          path: results/
