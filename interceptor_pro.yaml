@@ -1,5 +1,5 @@
 # ML-Agents Training Configuration for Interceptor Drone
-# This file should replace your current interceptor_pro.yaml
+# Compatible with ML-Agents 0.30.0
 
 behaviors:
   "My Behavior":  # This matches the behavior name from Unity: "My Behavior?team=0"
@@ -31,24 +31,13 @@ behaviors:
     time_horizon: 64
     summary_freq: 10000
 
-# Environment settings
+# Global training settings
 env_settings:
   env_path: null  # Will be set by command line argument
   env_args: null
   base_port: 5005
   num_envs: 1
-  num_areas: 1
   seed: -1
-  
-# Checkpoint settings  
-checkpoint_settings:
-  run_id: "InterceptorTraining"
-  initialize_from: null
-  load_model: false
-  resume: false
-  force: false
-  train_model: true
-  inference: false
   
 # Engine settings
 engine_settings:
