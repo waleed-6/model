@@ -186,13 +186,13 @@ jobs:
           sleep 2
           
           # Run training with extended timeout and better error handling
+          # Removed --worker-id parameter as it's not supported in ML-Agents 0.30.0
           timeout 340m mlagents-learn "${{ steps.resolveyaml.outputs.yaml_path }}" \
             --env="${ENV_PATH}" \
             --run-id="${{ github.event.inputs.run_id }}" \
             --no-graphics \
             --time-scale="${{ github.event.inputs.time_scale }}" \
             --force \
-            --worker-id=1 \
             --base-port=5005 || {
             echo "Training failed or timed out"
             echo "Checking if results were generated..."
