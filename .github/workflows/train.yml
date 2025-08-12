@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 360
 
     env:
-      # احتياطي: نفّذ البروتوبف بـ Python لو حصل أي تضارب
+      # احتياط ضد مشاكل البروتوبف
       PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
 
     steps:
@@ -73,8 +73,8 @@ jobs:
             exit 0
           fi
 
-          echo "Could not find interceptor_pro.yaml/.yml. Commit it أو حدد 'yaml_path' عند تشغيل الـ workflow."
-          exit 1
+          echo "yaml_path=" >> $GITHUB_OUTPUT
+          echo "No YAML found (this is OK for probe step)."
 
       - name: Set up Python 3.10.8 (compatible with mlagents 0.30.0)
         uses: actions/setup-python@v5
@@ -84,15 +84,9 @@ jobs:
       - name: Install trainer + tools (pin protobuf)
         run: |
           python -m pip install -U pip
-          # تثبيت نسخ متوافقة
           pip install "protobuf==3.20.3"
           pip install "mlagents==0.30.0" "mlagents_envs==0.30.0"
           pip install "tensorboard==2.14.0" gdown
-          python -c "import sys, pkgutil; print('PY', sys.version); 
-from importlib.metadata import version as V; 
-print('mlagents', V('mlagents')); 
-print('mlagents_envs', V('mlagents_envs')); 
-print('protobuf', V('protobuf'))"
 
       - name: Download Linux build from Google Drive
         run: |
@@ -109,7 +103,7 @@ print('protobuf', V('protobuf'))"
           echo "Top-level after unzip:"
           find ./env -maxdepth 2 -print
 
-          # امسك أول ملف تنفيذي لينُكس .x86_64 وتجاهل __MACOSX
+          # أمسك أول ملف تنفيذي لينُكس .x86_64 وتجاهل __MACOSX
           EXE=$(find ./env -type f -iname "*.x86_64" ! -path "*/__MACOSX/*" | head -n1)
 
           if [ -z "$EXE" ]; then
@@ -122,7 +116,42 @@ print('protobuf', V('protobuf'))"
           echo "exe_path=$EXE" >> $GITHUB_OUTPUT
           echo "Using executable: $EXE"
 
-      - name: Train (CPU)
+      - name: Probe behaviors (list behavior names/specs)
+        id: probe
+        env:
+          ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
+        run: |
+          python - << 'PY'
+import os, sys, json, time
+from mlagents_envs.environment import UnityEnvironment
+from mlagents_envs.base_env import BehaviorName
+
+env_path = os.environ.get("ENV_PATH")
+print(f"[Probe] Launching env: {env_path}")
+env = UnityEnvironment(file_name=env_path, no_graphics=True, timeout_wait=180)
+env.reset()
+behaviors = list(env.behavior_specs.keys())
+print("[Probe] Found behaviors:", behaviors)
+for b in behaviors:
+    spec = env.behavior_specs[b]
+    print(f"[Probe] {b}: obs_shapes={[o.shape for o in spec.observation_specs]}, "
+          f"action_type={'continuous' if spec.action_spec.is_continuous() else 'discrete'}, "
+          f"action_sizes={spec.action_spec.discrete_branch_sizes if spec.action_spec.is_discrete() else spec.action_spec.continuous_size}")
+env.close()
+# احفظ الأسماء في ملف لوغ واضح
+with open("behavior_names.txt","w") as f:
+    for b in behaviors:
+        f.write(f"{b}\n")
+PY
+
+      - name: Upload probe results (behavior names)
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-behaviors-${{ github.event.inputs.run_id }}
+          path: behavior_names.txt
+
+      - name: Train (CPU) — only if YAML exists
+        if: ${{ steps.resolveyaml.outputs.yaml_path != '' }}
         env:
           ENV_PATH: ${{ steps.unzipbuild.outputs.exe_path }}
         run: |
@@ -135,6 +164,7 @@ print('protobuf', V('protobuf'))"
             --time-scale="${{ github.event.inputs.time_scale }}"
 
       - name: Upload training results
+        if: ${{ steps.resolveyaml.outputs.yaml_path != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: results-${{ github.event.inputs.run_id }}
